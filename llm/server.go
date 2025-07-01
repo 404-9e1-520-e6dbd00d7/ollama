@@ -296,8 +296,12 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 
 	var llamaModel *llama.Model
 	var textProcessor model.TextProcessor
+	slog.Debug("TRY NEW ENGINE")
+	slog.Debug("TRY NEW ENGINE envconf", envconfig.NewEngine(), "eng req. (name)", f.KV().OllamaEngineRequired())
 	if envconfig.NewEngine() || f.KV().OllamaEngineRequired() {
+		slog.Debug("TRY NEW ENGINE INSIDE")
 		textProcessor, err = model.NewTextProcessor(modelPath)
+		slog.Debug("TRY NEW ENGINE Text Error", err)
 		if err != nil {
 			// To prepare for opt-out mode, instead of treating this as an error, we fallback to the old runner
 			slog.Debug("model not yet supported by Ollama engine, switching to compatibility mode", "model", modelPath, "error", err)
@@ -952,8 +956,11 @@ func (s *llmServer) Embedding(ctx context.Context, input string) ([]float32, err
 }
 
 type RerankRequest struct {
-	Model   string   `json:"model"`
-	Prompts []string `json:"prompts"`
+	Model     string   `json:"model"`
+	Prompts   []string `json:"prompts"` /* TODO are these neccessarry or not???*/
+	Query     string   `json:"query"`
+	TopN      int      `json:"top_n"`
+	Documents []string `json:"documents"`
 }
 
 type RerankResponse struct {
