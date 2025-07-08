@@ -67,6 +67,7 @@ type LlamaServer interface {
 	WaitUntilRunning(ctx context.Context) error
 	Completion(ctx context.Context, req CompletionRequest, fn func(CompletionResponse)) error
 	Embedding(ctx context.Context, input string) ([]float32, error)
+	Rerank(ctx context.Context, req RerankRequest, fn func(RerankResponse)) error
 	Tokenize(ctx context.Context, content string) ([]int, error)
 	Detokenize(ctx context.Context, tokens []int) (string, error)
 	Close() error
@@ -139,13 +140,6 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 		gpus = discover.GetCPUInfo()
 	}
 
-	// Verify the requested context size is <= the model training size
-	trainCtx := f.KV().ContextLength()
-	if opts.NumCtx/numParallel > int(trainCtx) && trainCtx > 0 {
-		slog.Warn("requested context size too large for model", "num_ctx", opts.NumCtx, "num_parallel", numParallel, "n_ctx_train", trainCtx)
-		opts.NumCtx = int(trainCtx) * numParallel
-	}
-
 	estimate := EstimateGPULayers(gpus, f, projectors, opts, numParallel)
 	if len(gpus) > 1 || gpus[0].Library != "cpu" {
 		switch {
@@ -179,7 +173,9 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 		"--ctx-size", strconv.Itoa(opts.NumCtx),
 		"--batch-size", strconv.Itoa(opts.NumBatch),
 	}
-
+	if opts.Reranking {
+		params = append(params, "--reranking")
+	}
 	if opts.NumGPU >= 0 {
 		params = append(params, "--n-gpu-layers", strconv.Itoa(opts.NumGPU))
 	}
@@ -300,8 +296,12 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 
 	var llamaModel *llama.Model
 	var textProcessor model.TextProcessor
+	slog.Debug("TRY NEW ENGINE")
+	slog.Debug("TRY NEW ENGINE envconf", envconfig.NewEngine(), "eng req. (name)", f.KV().OllamaEngineRequired())
 	if envconfig.NewEngine() || f.KV().OllamaEngineRequired() {
+		slog.Debug("TRY NEW ENGINE INSIDE")
 		textProcessor, err = model.NewTextProcessor(modelPath)
+		slog.Debug("TRY NEW ENGINE Text Error", err)
 		if err != nil {
 			// To prepare for opt-out mode, instead of treating this as an error, we fallback to the old runner
 			slog.Debug("model not yet supported by Ollama engine, switching to compatibility mode", "model", modelPath, "error", err)
@@ -318,7 +318,7 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 		params = append(params, "--mmproj", projectors[0])
 	}
 
-	// iterate through compatible GPU libraries such as 'cuda_v12', 'rocm', etc.
+	// iterate through compatible GPU libraries such as 'cuda_v12', 'cuda_v11', 'rocm', etc.
 	// adding each library's respective path to the LD_LIBRARY_PATH, until finally running
 	// without any LD_LIBRARY_PATH flags
 	for {
@@ -953,6 +953,73 @@ func (s *llmServer) Embedding(ctx context.Context, input string) ([]float32, err
 	}
 
 	return e.Embedding, nil
+}
+
+type RerankRequest struct {
+	Model     string   `json:"model"`
+	Prompts   []string `json:"prompts"` /* TODO are these neccessarry or not???*/
+	Query     string   `json:"query"`
+	TopN      int      `json:"top_n"`
+	Documents []string `json:"documents"`
+}
+
+type RerankResponse struct {
+	Results []struct {
+		Index          int     `json:"index"`
+		RelevanceScore float32 `json:"relevance_score"`
+	} `json:"results"`
+	api.Usage
+}
+
+func (s *llmServer) Rerank(ctx context.Context, req RerankRequest, fn func(RerankResponse)) error {
+	if err := s.sem.Acquire(ctx, 1); err != nil {
+		slog.Error("Failed to acquire semaphore", "error", err)
+		return err
+	}
+	defer s.sem.Release(1)
+
+	status, err := s.getServerStatusRetry(ctx)
+	if err != nil {
+		return err
+	} else if status != ServerStatusReady {
+		return fmt.Errorf("unexpected server status: %s", status.String())
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("error marshaling rerank data: %w", err)
+	}
+
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/rerank", s.port), bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("error creating rerank request: %w", err)
+	}
+
+	r.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		return fmt.Errorf("do rerank request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading rerank response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		log.Printf("llm rerank error: %s", body)
+		return fmt.Errorf("%s", body)
+	}
+
+	var rr RerankResponse
+	if err := json.Unmarshal(body, &rr); err != nil {
+		return fmt.Errorf("unmarshal tokenize response: %w", err)
+	}
+	fn(rr)
+
+	return nil
 }
 
 type TokenizeRequest struct {
