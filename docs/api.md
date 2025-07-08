@@ -1648,6 +1648,15 @@ Rerank a list of documents based on a query.
 
 ### Examples
 
+Run ollama with environment variable OLLAMA_NEW_ENGINE=1
+
+Using the Modelfile:
+```
+FROM fanyx/Qwen3-Reranker-0.6B-Q8_0
+
+TEMPLATE """[BOS]{{ .Query }}[EOS][SEP]{{ .Document }}[EOS]"""
+```
+
 #### Request
 
 ```shell
@@ -1666,13 +1675,6 @@ curl http://127.0.0.1:11434/api/rerank \
 		"Ollama is a machine learning framework"
       ]
     }' | jq
-```
-
-Using the Modelfile:
-```
-FROM fanyx/Qwen3-Reranker-0.6B-Q8_0
-
-TEMPLATE """[BOS]{{ .Query }}[EOS][SEP]{{ .Document }}[EOS]"""
 ```
 
 #### Response
