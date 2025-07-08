@@ -781,22 +781,17 @@ func (s *Server) rerank(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parseFn := func(p string) string {
-		// Assuming the model automatically adds BOS/EOS if needed during tokenization
 		// For reranking, we explicitly replace placeholder tags if they exist in the prompt.
-		return p
-
 		p = strings.ReplaceAll(p, "[BOS]", BOSPiece)
 		p = strings.ReplaceAll(p, "[EOS]", EOSPiece)
-		//p = strings.ReplaceAll(p, "[SEP]", SEPPiece)
 		return p
 	}
 
-	slog.Info("Rerank Request Documents", req)
-
 	var totalTokens int
 	for _, p := range req.Prompts {
-		// Encode with add_bos = true and special = true if the model is expected to handle it
-		tokens, err := textProcessor.Encode(parseFn(p), true)
+		parsedPrompt := parseFn(p)
+		slog.Debug("Processing prompt", "parsed", parsedPrompt)
+		tokens, err := textProcessor.Encode(parsedPrompt, true)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to tokenize prompt: %v", err), http.StatusInternalServerError)
 			return
@@ -811,7 +806,7 @@ func (s *Server) rerank(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i, prompt := range req.Prompts {
-		seq, err := s.NewSequence(parseFn(prompt), nil, NewSequenceParams{embedding: true}) // Set embedding to true for reranking
+		seq, err := s.NewSequence(parseFn(prompt), nil, NewSequenceParams{embedding: true})
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to create new sequence: %v", err), http.StatusInternalServerError)
 			return
@@ -852,7 +847,7 @@ func (s *Server) rerank(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		score := <-seq.embedding // Receive the relevance score
+		score := <-seq.embedding
 
 		rsp.Results = append(rsp.Results, RerankResult{
 			Index:          i,
@@ -1007,7 +1002,7 @@ func (s *Server) initModel(
 	s.parallel = parallel
 	s.seqs = make([]*Sequence, s.parallel)
 	s.seqsSem = semaphore.NewWeighted(int64(s.parallel))
-	s.reranking = reranking // Set reranking flag
+	s.reranking = reranking
 
 	return s.reserveWorstCaseGraph()
 }
@@ -1058,7 +1053,7 @@ func Execute(args []string) error {
 	_ = fs.Bool("no-mmap", false, "do not memory-map model (slower load but may reduce pageouts if not using mlock)")
 	tensorSplit := fs.String("tensor-split", "", "fraction of the model to offload to each GPU, comma-separated list of proportions")
 	multiUserCache := fs.Bool("multiuser-cache", false, "optimize input cache algorithm for multiple users")
-	reranking := fs.Bool("reranking", false, "enable reranking") // Add reranking flag
+	reranking := fs.Bool("reranking", false, "enable reranking")
 
 	var lpaths multiLPath
 	fs.Var(&lpaths, "lora", "Path to lora layer file (can be specified multiple times)")
@@ -1117,7 +1112,7 @@ func Execute(args []string) error {
 	defer listener.Close()
 
 	mux := http.NewServeMux()
-	// TODO: support embeddings - this endpoint currently always returns not implemented
+	// TODO: support embeddings
 	mux.HandleFunc("POST /embedding", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this model does not support embeddings", http.StatusNotImplemented)
 	})
